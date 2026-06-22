@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+output/*.png
+input/test/
+input/sample_ref_split/
+input/_check_ref/
+input/_uploaded_covers.csv
+logs/
