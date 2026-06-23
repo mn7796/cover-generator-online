@@ -2,10 +2,16 @@
 __pycache__/
 *.pyc
 .DS_Store
+.env
+.env.*
+.streamlit/secrets.toml
 output/*.png
+output/*.zip
 output/iterations/
+input/uploads/
 input/test/
 input/sample_ref_split/
 input/_check_ref/
 input/_uploaded_covers.csv
 logs/
+*.log

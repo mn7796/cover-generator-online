@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import os
 import shutil
 import zipfile
 from datetime import datetime
@@ -15,6 +16,34 @@ from generate import CoverText, draw_cover, ensure_dirs, read_csv_rows
 
 st.set_page_config(page_title="短视频封面批量生成工具", page_icon="🎬", layout="wide")
 ensure_dirs()
+
+
+def get_secret_value(name: str, default: str = "") -> str:
+    try:
+        value = st.secrets.get(name)
+    except Exception:
+        value = None
+    return str(value or os.getenv(name, default) or "").strip()
+
+
+def require_app_password() -> None:
+    expected_password = get_secret_value("APP_PASSWORD")
+    if not expected_password:
+        st.error("线上部署版未配置 APP_PASSWORD。请先在 Streamlit Secrets 里配置访问密码。")
+        st.stop()
+
+    if st.session_state.get("app_authenticated"):
+        return
+
+    st.title("短视频封面批量生成工具")
+    st.caption("请输入访问密码后继续使用。")
+    entered_password = st.text_input("访问密码", type="password")
+    if st.button("进入", type="primary"):
+        if entered_password == expected_password:
+            st.session_state["app_authenticated"] = True
+            st.rerun()
+        st.error("密码不正确，请重新输入。")
+    st.stop()
 
 
 def safe_error_message(exc: Exception) -> str:
@@ -257,6 +286,8 @@ def ensure_batch_modules() -> None:
             st.session_state["batch_modules"] = [make_default_module(1)]
 
 
+require_app_password()
+
 st.title("短视频封面批量生成工具")
 st.caption("固定模板生成 1080x1440 PNG，小红书/抖音英语学习类封面。")
 
@@ -271,10 +302,13 @@ with st.sidebar:
         selected_output_dir = OUTPUT_DIR
 
     st.subheader("AI 接口设置")
-    ai_api_key = st.text_input("API Key", type="password", help="只在当前页面会话中使用，不会写入项目文件。")
-    ai_base_url = st.text_input("Base URL", value="https://www.aiartmirror.com/v1")
+    secret_api_key = get_secret_value("OPENAI_API_KEY")
+    secret_base_url = get_secret_value("OPENAI_BASE_URL", "https://www.aiartmirror.com/v1")
+    ai_api_key_override = st.text_input("API Key 临时覆盖", type="password", help="线上优先使用 Secrets 里的 OPENAI_API_KEY；这里仅用于临时覆盖，不会写入项目文件。")
+    ai_api_key = ai_api_key_override.strip() or secret_api_key
+    ai_base_url = st.text_input("Base URL", value=secret_base_url or "https://www.aiartmirror.com/v1")
     ai_image_size = st.text_input("AI 图片尺寸", value="1088x1456")
-    st.caption("只用固定模板时可以不填。使用 AI 精修时必须填写 API Key；兼容网关还要填写 Base URL。")
+    st.caption("固定模板不需要 API Key。AI 精修/迭代会优先读取 Streamlit Secrets 或环境变量。")
 
 page_mode = st.radio("模式选择", ["新建封面", "基于上一版迭代修改"], horizontal=True)
 
