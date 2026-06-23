@@ -21,6 +21,35 @@ AI_MODEL = "gpt-image-2"
 AI_WORK_SIZE = "1088x1456"
 
 
+ITERATION_BASE_RULES = """
+基于当前这一版继续迭代，不要重新生成，不要改原本的产出逻辑，只按用户本次口述做局部修改，其余保持不变。
+
+保持不变：
+- 整体版式逻辑
+- 三图拼接逻辑
+- 标题区逻辑
+- 底部信息卡逻辑
+- 播放按钮逻辑
+- 图片顺序逻辑
+- 整体色调和风格
+- 人物脸部质感和清晰度
+
+本次只修改用户明确指出的内容。
+不要重做整张图，不要重新设计，不要改变布局，不要移动播放按钮，不要放大底部卡片，不要修改未提到的文字。
+""".strip()
+
+
+LOCK_LAYOUT_RULES = """
+锁定版式要求：
+- 不改版式
+- 不改元素位置
+- 不改播放按钮位置
+- 不改底部信息卡大小
+- 不改图片顺序
+- 不改没有提到的文字
+""".strip()
+
+
 def normalize_base_url(base_url: str | None) -> str | None:
     if not base_url:
         return None
@@ -81,6 +110,28 @@ Design details:
 - Text must be sharp, large, and correctly spelled.
 - Preserve the people and lifestyle scene from the input screenshots as much as possible.
 """.strip()
+
+
+def build_iteration_prompt(instruction: str, lock_layout: bool = True) -> str:
+    user_instruction = instruction.strip()
+    if not user_instruction:
+        raise ValueError("请先填写本次修改意见。")
+
+    parts = [
+        "你正在编辑一张已经生成好的短视频封面图。",
+        "输入图就是当前基准图 current_baseline.png，请基于它继续做局部迭代。",
+        ITERATION_BASE_RULES,
+    ]
+    if lock_layout:
+        parts.append(LOCK_LAYOUT_RULES)
+    parts.extend(
+        [
+            "本次修改意见：",
+            user_instruction,
+            "输出一张完整 PNG 封面图。文字必须清晰、准确，不要出现错字、乱码或重复字。",
+        ]
+    )
+    return "\n\n".join(parts)
 
 
 def _save_uploads_to_temp_files(images: Iterable[BinaryIO | str | Path]) -> list[str]:
@@ -245,3 +296,43 @@ def generate_ai_cover(
 def default_ai_output_path(cover_id: str) -> Path:
     safe_id = str(cover_id).strip() or "cover"
     return OUTPUT_DIR / f"{safe_id}_ai.png"
+
+
+def generate_iteration_cover(
+    baseline_path: str | Path,
+    instruction: str,
+    output_path: str | Path,
+    api_key: str | None = None,
+    base_url: str | None = None,
+    image_size: str | None = None,
+    lock_layout: bool = True,
+) -> Image.Image:
+    api_key = api_key or os.getenv("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("未设置 API Key。请在左侧「AI 接口设置」里填写 API Key，或在终端设置 OPENAI_API_KEY。")
+
+    baseline_path = Path(baseline_path)
+    if not baseline_path.exists():
+        raise FileNotFoundError(f"没有找到当前基准图：{baseline_path}")
+
+    base_url = normalize_base_url(base_url or os.getenv("OPENAI_BASE_URL") or os.getenv("OPENAI_API_BASE") or os.getenv("NEWAPI_BASE_URL"))
+    client = OpenAI(api_key=api_key, base_url=base_url) if base_url else OpenAI(api_key=api_key)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        result_path = Path(tmpdir) / "iteration_cover.png"
+        with baseline_path.open("rb") as baseline_file:
+            result = client.images.edit(
+                model=AI_MODEL,
+                image=[baseline_file],
+                prompt=build_iteration_prompt(instruction, lock_layout=lock_layout),
+                size=image_size or AI_WORK_SIZE,
+                quality="high",
+            )
+
+        result_path.write_bytes(_extract_image_bytes(result))
+        image = _normalize_to_output_size(Image.open(result_path))
+
+    output_path = Path(output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    image.save(output_path, "PNG", optimize=True)
+    return image

@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .DS_Store
 output/*.png
+output/iterations/
 input/test/
 input/sample_ref_split/
 input/_check_ref/

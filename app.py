@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import io
+import shutil
 import zipfile
 from datetime import datetime
 from pathlib import Path
 
 import streamlit as st
 
-from ai_generate import default_ai_output_path, generate_ai_cover
-from config import BASE_DIR, DEFAULT_TEXT, INPUT_DIR, OUTPUT_DIR
+from ai_generate import default_ai_output_path, generate_ai_cover, generate_iteration_cover
+from config import BASE_DIR, DEFAULT_TEXT, INPUT_DIR, ITERATIONS_DIR, OUTPUT_DIR
 from generate import CoverText, draw_cover, ensure_dirs, read_csv_rows
 
 
@@ -62,6 +63,52 @@ def resolve_output_dir(raw_path: str) -> Path:
     return path
 
 
+def get_iterations_dir(output_dir: Path) -> Path:
+    if output_dir == OUTPUT_DIR:
+        return ITERATIONS_DIR
+    return output_dir / "iterations"
+
+
+def get_current_baseline_path(iterations_dir: Path) -> Path:
+    return iterations_dir / "current_baseline.png"
+
+
+def set_iteration_baseline(source_path: Path, iterations_dir: Path) -> Path:
+    iterations_dir.mkdir(parents=True, exist_ok=True)
+    baseline_path = get_current_baseline_path(iterations_dir)
+    shutil.copyfile(source_path, baseline_path)
+    return baseline_path
+
+
+def next_iteration_path(iterations_dir: Path) -> Path:
+    iterations_dir.mkdir(parents=True, exist_ok=True)
+    max_index = 0
+    for path in iterations_dir.glob("iter_*.png"):
+        try:
+            max_index = max(max_index, int(path.stem.removeprefix("iter_")))
+        except ValueError:
+            continue
+    return iterations_dir / f"iter_{max_index + 1:03d}.png"
+
+
+def latest_iteration_path(iterations_dir: Path) -> Path | None:
+    paths = sorted(iterations_dir.glob("iter_*.png"), key=lambda path: path.stat().st_mtime, reverse=True)
+    return paths[0] if paths else None
+
+
+def latest_cover_path(output_dir: Path) -> Path | None:
+    if not output_dir.exists():
+        return None
+    candidates = []
+    for path in output_dir.glob("*.png"):
+        if path.name in {"stable_v1_sample.png", ".gitkeep"}:
+            continue
+        candidates.append(path)
+    if not candidates:
+        return None
+    return max(candidates, key=lambda path: path.stat().st_mtime)
+
+
 def get_image_sources(uploads: list, fallback_folder: Path) -> list | None:
     provided = [file is not None for file in uploads]
     if any(provided):
@@ -97,6 +144,86 @@ def generate_with_mode(
         base_url=base_url.strip() or None,
         image_size=image_size.strip() or None,
     )
+
+
+def render_iteration_page(output_dir: Path, api_key: str, base_url: str, image_size: str) -> None:
+    iterations_dir = get_iterations_dir(output_dir)
+    iterations_dir.mkdir(parents=True, exist_ok=True)
+    baseline_path = get_current_baseline_path(iterations_dir)
+
+    if not baseline_path.exists():
+        latest_cover = latest_cover_path(output_dir)
+        if latest_cover:
+            set_iteration_baseline(latest_cover, iterations_dir)
+            st.info(f"已用最近生成图初始化当前基准图：{latest_cover.name}")
+
+    baseline_exists = baseline_path.exists()
+    latest_iter = st.session_state.get("latest_iteration_path")
+    latest_path = Path(latest_iter) if latest_iter else latest_iteration_path(iterations_dir)
+    if latest_path and not latest_path.exists():
+        latest_path = latest_iteration_path(iterations_dir)
+
+    left, right = st.columns([0.9, 1.1], gap="large")
+    with left:
+        st.subheader("迭代设置")
+        st.caption(f"版本目录：{iterations_dir}")
+        lock_layout = st.toggle("锁定版式", value=True)
+        instruction = st.text_area(
+            "本次修改意见",
+            placeholder="左上角 Vlog 3 改成 Vlog 4；白色小条里的“让女生变穷的消费习惯”后面加上(2)；其他不变。",
+            height=150,
+        )
+        iterate_btn = st.button("基于上一版生成迭代图", type="primary", use_container_width=True)
+
+        if iterate_btn:
+            if not baseline_exists:
+                st.error("还没有 current_baseline.png。请先在「新建封面」生成一张图，或把基准图放到迭代目录。")
+            elif not instruction.strip():
+                st.error("请先填写本次修改意见。")
+            else:
+                try:
+                    output_path = next_iteration_path(iterations_dir)
+                    with st.spinner("正在基于上一版做局部迭代，请稍等..."):
+                        image = generate_iteration_cover(
+                            baseline_path,
+                            instruction,
+                            output_path,
+                            api_key=api_key.strip() or None,
+                            base_url=base_url.strip() or None,
+                            image_size=image_size.strip() or None,
+                            lock_layout=lock_layout,
+                        )
+                    st.session_state["latest_iteration_path"] = str(output_path)
+                    latest_path = output_path
+                    st.success(f"已保存到：{output_path}")
+                    st.image(image, use_container_width=True)
+                except Exception as exc:
+                    st.error(safe_error_message(exc))
+
+    with right:
+        st.subheader("当前基准图")
+        if baseline_path.exists():
+            st.image(str(baseline_path), use_container_width=True)
+        else:
+            st.warning("当前还没有基准图。先在「新建封面」里生成一张图后，再回来迭代。")
+
+        st.divider()
+        st.subheader("最新迭代图")
+        if latest_path and latest_path.exists():
+            st.image(str(latest_path), use_container_width=True)
+            st.download_button(
+                "下载最新迭代图",
+                data=latest_path.read_bytes(),
+                file_name=latest_path.name,
+                mime="image/png",
+                use_container_width=True,
+            )
+            if st.button("设为新的基准图", use_container_width=True):
+                set_iteration_baseline(latest_path, iterations_dir)
+                st.success("已设为新的 current_baseline.png。下一次会基于它继续迭代。")
+                st.rerun()
+        else:
+            st.info("完成一次迭代后，这里会显示最新结果。")
 
 
 def add_history(record: dict) -> None:
@@ -148,6 +275,12 @@ with st.sidebar:
     ai_base_url = st.text_input("Base URL", value="https://www.aiartmirror.com/v1")
     ai_image_size = st.text_input("AI 图片尺寸", value="1088x1456")
     st.caption("只用固定模板时可以不填。使用 AI 精修时必须填写 API Key；兼容网关还要填写 Base URL。")
+
+page_mode = st.radio("模式选择", ["新建封面", "基于上一版迭代修改"], horizontal=True)
+
+if page_mode == "基于上一版迭代修改":
+    render_iteration_page(selected_output_dir, ai_api_key, ai_base_url, ai_image_size)
+    st.stop()
 
 tab_single, tab_batch = st.tabs(["单张生成", "批量生成"])
 
@@ -205,6 +338,7 @@ with tab_single:
                                 ai_image_size,
                             )
                         png_bytes = image_to_bytes(image)
+                        baseline_path = set_iteration_baseline(output_path, get_iterations_dir(selected_output_dir))
                         add_history(
                             {
                                 "time": datetime.now().strftime("%H:%M:%S"),
@@ -215,6 +349,7 @@ with tab_single:
                         )
                         st.image(image, use_container_width=True)
                         st.success(f"已保存到：{output_path}")
+                        st.caption(f"已同步为迭代基准图：{baseline_path}")
                         st.download_button(
                             "下载 PNG",
                             data=png_bytes,
